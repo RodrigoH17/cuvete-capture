@@ -1,0 +1,36 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# virtual environment
+venv/
+.env/
+.env.*
+
+# =========================
+# Dataset / Outputs (global)
+# =========================
+**/dataset/
+**/debug/
+**/output/
+
+# ignorar conteúdo mas não a pasta
+**/videos/*
+!**/videos/.gitkeep
+
+# =========================
+# OS / Editor
+# =========================
+.DS_Store
+Thumbs.db
+.vscode/
+
+# =========================
+# Logs / temp
+# =========================
+*.log
+*.tmp
