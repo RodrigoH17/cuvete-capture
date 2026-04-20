@@ -7,11 +7,10 @@ import glob
 # ============================================================
 # CONFIG
 # ============================================================
-VIDEO_PATH = "videos/cam1_140012_0121.mp4"
+VIDEOS_GLOB = "videos/*.*"
 TEMPLATES_GLOB = "templates/*.*"
-OUTPUT_VIDEO_PATH = "output/video_anotado.mp4"
 
-TH = 17
+TH = 15
 COVETE_CANDIDATE_MIN_SCORE = 15
 
 SLEEP_SEC = 0.01
@@ -26,7 +25,7 @@ DATASET_EVENT_DELAY_SEC = 0.10
 NAO_COVETE_MAX_SCORE = 8
 
 SHOW_WINDOW = True
-SAVE_OUTPUT_VIDEO = True
+SAVE_OUTPUT_VIDEO = False   # DESLIGADO
 
 # ----------------------------
 # ROI
@@ -306,7 +305,7 @@ def detect_motion(roi_gray, prev_motion_frame, motion_counter, no_motion_counter
     }
 
 
-def save_debug_matches(now, roi_gray, final_result):
+def save_debug_matches(now, roi_gray, final_result, video_name):
     if final_result["template_ref"] is None or len(final_result["good_matches"]) == 0:
         return False
 
@@ -327,7 +326,7 @@ def save_debug_matches(now, roi_gray, final_result):
     )
 
     status = "COVETE" if final_result["is_covete"] else "NAO_COVETE"
-    filename = f"debug/matches_{int(now)}_{status}_{final_result['score']}_{final_result['template_name']}.jpg"
+    filename = f"debug/{video_name}_matches_{int(now)}_{status}_{final_result['score']}_{final_result['template_name']}.jpg"
     cv2.imwrite(filename, match_img)
     print(f"[DEBUG] Imagem de matches guardada: {filename}")
     return True
@@ -457,273 +456,286 @@ def draw_overlay(
 
 
 # ============================================================
-# LOAD VIDEO / TEMPLATES
+# PROCESSAR UM VIDEO
 # ============================================================
-cap = cv2.VideoCapture(VIDEO_PATH)
-if not cap.isOpened():
-    raise SystemExit(f"ERRO: não foi possível abrir o vídeo '{VIDEO_PATH}'")
+def process_video(video_path, orb, bf, templates):
+    video_name = os.path.splitext(os.path.basename(video_path))[0]
 
-video_fps = cap.get(cv2.CAP_PROP_FPS)
-if video_fps <= 0 or video_fps != video_fps:
-    video_fps = 20.0
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"[ERRO] Não foi possível abrir o vídeo '{video_path}'")
+        return
 
-frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    video_fps = cap.get(cv2.CAP_PROP_FPS)
+    if video_fps <= 0 or video_fps != video_fps:
+        video_fps = 20.0
 
-print(f"[INFO] Video: {VIDEO_PATH}")
-print(f"[INFO] FPS: {video_fps:.2f}")
-print(f"[INFO] Resolucao: {frame_width}x{frame_height}")
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-if ROI_X < 0 or ROI_Y < 0 or ROI_X + ROI_W > frame_width or ROI_Y + ROI_H > frame_height:
-    raise SystemExit(
-        f"ERRO: ROI fora dos limites da imagem. "
-        f"Imagem={frame_width}x{frame_height}, ROI=({ROI_X},{ROI_Y},{ROI_W},{ROI_H})"
-    )
+    print(f"\n[INFO] Video: {video_path}")
+    print(f"[INFO] FPS: {video_fps:.2f}")
+    print(f"[INFO] Resolucao: {frame_width}x{frame_height}")
 
-orb = cv2.ORB_create(nfeatures=1200)
-bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-templates = load_templates(TEMPLATES_GLOB, orb)
-
-writer = None
-if SAVE_OUTPUT_VIDEO:
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(
-        OUTPUT_VIDEO_PATH,
-        fourcc,
-        video_fps,
-        (frame_width, frame_height)
-    )
-
-
-# ============================================================
-# STATE
-# ============================================================
-last_debug_save = 0.0
-last_save_covete = 0.0
-last_save_nao_covete = 0.0
-last_covete_detect_time = 0.0
-last_print = 0.0
-
-prev_motion_frame = None
-motion_counter = 0
-no_motion_counter = 0
-last_motion_time = 0.0
-
-prev_motion_detected = False
-event_state = reset_event_state()
-
-last_final_score = 0
-last_final_template_name = "-"
-last_final_source = "-"
-
-frame_index = 0
-
-print("\n[INFO] A processar video offline... prima 'q' ou ESC para parar.\n")
-
-
-# ============================================================
-# MAIN LOOP
-# ============================================================
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        print("[INFO] Fim do video.")
-        break
-
-    frame_index += 1
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    roi_gray = gray[ROI_Y:ROI_Y + ROI_H, ROI_X:ROI_X + ROI_W]
-
-    motion_data = detect_motion(
-        roi_gray,
-        prev_motion_frame,
-        motion_counter,
-        no_motion_counter,
-        last_motion_time
-    )
-
-    prev_motion_frame = motion_data["prev_motion_frame"]
-    motion_counter = motion_data["motion_counter"]
-    no_motion_counter = motion_data["no_motion_counter"]
-    last_motion_time = motion_data["last_motion_time"]
-
-    if motion_data["skip_frame"]:
-        continue
-
-    motion_detected = motion_data["motion_detected"]
-    motion_mask = motion_data["motion_mask"]
-    changed_ratio = motion_data["changed_ratio"]
-    max_motion_area = motion_data["max_motion_area"]
-    main_motion_box = motion_data["main_motion_box"]
-
-    now = time.time()
-
-    live_result = {
-        "score": 0,
-        "is_covete": False,
-        "template_name": "-",
-        "kp_count": 0,
-        "good_matches": [],
-        "template_ref": None,
-        "kp2": None
-    }
-
-    if motion_detected:
-        live_result = classify_roi_with_orb(roi_gray, orb, bf, templates)
-
-    # ----------------------------
-    # INICIO DE EVENTO
-    # ----------------------------
-    if not prev_motion_detected and motion_detected:
-        print(f"[EVENT] INICIO | frame={frame_index}")
-        event_state = reset_event_state()
-        event_state["start_time"] = now
-
-    # ----------------------------
-    # ESCOLHER MELHOR FRAME DO EVENTO
-    # ----------------------------
-    allow_event_evaluation = (
-        motion_detected and
-        event_state["start_time"] is not None and
-        (now - event_state["start_time"]) >= DATASET_EVENT_DELAY_SEC and
-        main_motion_box is not None
-    )
-
-    if allow_event_evaluation:
-        selection_score, center_bonus, size_bonus, sharpness_bonus = compute_selection_score(
-            roi_gray,
-            main_motion_box
+    if ROI_X < 0 or ROI_Y < 0 or ROI_X + ROI_W > frame_width or ROI_Y + ROI_H > frame_height:
+        print(
+            f"[ERRO] ROI fora dos limites da imagem. "
+            f"Imagem={frame_width}x{frame_height}, ROI=({ROI_X},{ROI_Y},{ROI_W},{ROI_H})"
         )
+        cap.release()
+        return
 
-        if selection_score > event_state["best_visual_score"]:
-            event_state["best_visual_score"] = selection_score
-            event_state["best_visual_frame"] = frame.copy()
-            event_state["best_visual_roi_gray"] = roi_gray.copy()
-            event_state["best_visual_box"] = main_motion_box
-            event_state["best_visual_center_bonus"] = center_bonus
-            event_state["best_visual_size_bonus"] = size_bonus
-            event_state["best_visual_sharpness_bonus"] = sharpness_bonus
+    # ============================================================
+    # STATE
+    # ============================================================
+    last_debug_save = 0.0
+    last_save_covete = 0.0
+    last_save_nao_covete = 0.0
+    last_covete_detect_time = 0.0
+    last_print = 0.0
 
-        if live_result["score"] >= COVETE_CANDIDATE_MIN_SCORE:
-            if selection_score > event_state["best_cov_score"]:
-                event_state["best_cov_score"] = selection_score
-                event_state["best_cov_frame"] = frame.copy()
-                event_state["best_cov_roi_gray"] = roi_gray.copy()
-                event_state["best_cov_box"] = main_motion_box
-                event_state["best_cov_live_score"] = live_result["score"]
-                event_state["best_cov_template_name"] = live_result["template_name"]
+    prev_motion_frame = None
+    motion_counter = 0
+    no_motion_counter = 0
+    last_motion_time = 0.0
 
-    # ----------------------------
-    # FIM DE EVENTO
-    # ----------------------------
-    if prev_motion_detected and not motion_detected:
-        print(f"[EVENT] FIM | frame={frame_index} | best_sel={event_state['best_visual_score']:.1f}")
+    prev_motion_detected = False
+    event_state = reset_event_state()
 
-        frame_to_classify = event_state["best_visual_frame"]
-        roi_to_classify = event_state["best_visual_roi_gray"]
-        source_to_classify = "visual"
-        selected_selection_score = event_state["best_visual_score"]
+    last_final_score = 0
+    last_final_template_name = "-"
+    last_final_source = "-"
 
-        if event_state["best_cov_frame"] is not None and event_state["best_cov_roi_gray"] is not None:
-            frame_to_classify = event_state["best_cov_frame"]
-            roi_to_classify = event_state["best_cov_roi_gray"]
-            source_to_classify = "cov_candidate"
-            selected_selection_score = event_state["best_cov_score"]
+    frame_index = 0
 
-        if frame_to_classify is not None and roi_to_classify is not None:
-            final_result = classify_roi_with_orb(roi_to_classify, orb, bf, templates)
+    print(f"\n[INFO] A processar vídeo: {video_name}\n")
 
-            last_final_score = final_result["score"]
-            last_final_template_name = final_result["template_name"]
-            last_final_source = source_to_classify
-
-            if final_result["is_covete"]:
-                if now - last_save_covete >= SAVE_INTERVAL_COVETE:
-                    filename = f"dataset/covete/covete_{int(now * 1000)}.jpg"
-                    cv2.imwrite(filename, frame_to_classify)
-
-                    print(
-                        f"[DATASET] Guardado em covete: {filename} | "
-                        f"final_score={final_result['score']} | "
-                        f"selection={selected_selection_score:.1f} | "
-                        f"source={source_to_classify} | "
-                        f"tpl={final_result['template_name']} | kp={final_result['kp_count']}"
-                    )
-
-                    last_save_covete = now
-                    last_covete_detect_time = now
-            else:
-                can_save_nao_covete = (
-                    final_result["score"] <= NAO_COVETE_MAX_SCORE and
-                    (now - last_covete_detect_time) >= POST_COVETE_BLOCK_SEC
-                )
-
-                if can_save_nao_covete and (now - last_save_nao_covete >= SAVE_INTERVAL_NAO_COVETE):
-                    filename = f"dataset/nao_covete/nao_covete_{int(now * 1000)}.jpg"
-                    cv2.imwrite(filename, frame_to_classify)
-
-                    print(
-                        f"[DATASET] Guardado em nao_covete: {filename} | "
-                        f"final_score={final_result['score']} | "
-                        f"selection={selected_selection_score:.1f} | "
-                        f"source={source_to_classify} | kp={final_result['kp_count']}"
-                    )
-
-                    last_save_nao_covete = now
-
-            if (
-                DEBUG_SAVE_MATCHES and
-                (now - last_debug_save >= DEBUG_SAVE_INTERVAL)
-            ):
-                if save_debug_matches(now, roi_to_classify, final_result):
-                    last_debug_save = now
-
-        event_state = reset_event_state()
-
-    prev_motion_detected = motion_detected
-
-    # ----------------------------
-    # OVERLAY / PRINT
-    # ----------------------------
-    draw, text = draw_overlay(
-        frame=frame,
-        motion_detected=motion_detected,
-        live_result=live_result,
-        motion_mask=motion_mask,
-        main_motion_box=main_motion_box,
-        event_state=event_state,
-        changed_ratio=changed_ratio,
-        max_motion_area=max_motion_area,
-        frame_index=frame_index,
-        last_final_score=last_final_score,
-        last_final_template_name=last_final_template_name,
-        last_final_source=last_final_source
-    )
-
-    if now - last_print >= 0.2:
-        print(text)
-        last_print = now
-
-    if SAVE_OUTPUT_VIDEO and writer is not None:
-        writer.write(draw)
-
-    if SHOW_WINDOW:
-        cv2.imshow("Detecao de Covete - Video", draw)
-        key = cv2.waitKey(1) & 0xFF
-        if key == 27 or key == ord("q"):
-            print("[INFO] Interrompido pelo utilizador.")
+    # ============================================================
+    # MAIN LOOP
+    # ============================================================
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print(f"[INFO] Fim do vídeo: {video_name}")
             break
 
-    time.sleep(SLEEP_SEC)
+        frame_index += 1
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        roi_gray = gray[ROI_Y:ROI_Y + ROI_H, ROI_X:ROI_X + ROI_W]
+
+        motion_data = detect_motion(
+            roi_gray,
+            prev_motion_frame,
+            motion_counter,
+            no_motion_counter,
+            last_motion_time
+        )
+
+        prev_motion_frame = motion_data["prev_motion_frame"]
+        motion_counter = motion_data["motion_counter"]
+        no_motion_counter = motion_data["no_motion_counter"]
+        last_motion_time = motion_data["last_motion_time"]
+
+        if motion_data["skip_frame"]:
+            continue
+
+        motion_detected = motion_data["motion_detected"]
+        motion_mask = motion_data["motion_mask"]
+        changed_ratio = motion_data["changed_ratio"]
+        max_motion_area = motion_data["max_motion_area"]
+        main_motion_box = motion_data["main_motion_box"]
+
+        now = time.time()
+
+        live_result = {
+            "score": 0,
+            "is_covete": False,
+            "template_name": "-",
+            "kp_count": 0,
+            "good_matches": [],
+            "template_ref": None,
+            "kp2": None
+        }
+
+        if motion_detected:
+            live_result = classify_roi_with_orb(roi_gray, orb, bf, templates)
+
+        # ----------------------------
+        # INICIO DE EVENTO
+        # ----------------------------
+        if not prev_motion_detected and motion_detected:
+            print(f"[EVENT] INICIO | video={video_name} | frame={frame_index}")
+            event_state = reset_event_state()
+            event_state["start_time"] = now
+
+        # ----------------------------
+        # ESCOLHER MELHOR FRAME DO EVENTO
+        # ----------------------------
+        allow_event_evaluation = (
+            motion_detected and
+            event_state["start_time"] is not None and
+            (now - event_state["start_time"]) >= DATASET_EVENT_DELAY_SEC and
+            main_motion_box is not None
+        )
+
+        if allow_event_evaluation:
+            selection_score, center_bonus, size_bonus, sharpness_bonus = compute_selection_score(
+                roi_gray,
+                main_motion_box
+            )
+
+            if selection_score > event_state["best_visual_score"]:
+                event_state["best_visual_score"] = selection_score
+                event_state["best_visual_frame"] = frame.copy()
+                event_state["best_visual_roi_gray"] = roi_gray.copy()
+                event_state["best_visual_box"] = main_motion_box
+                event_state["best_visual_center_bonus"] = center_bonus
+                event_state["best_visual_size_bonus"] = size_bonus
+                event_state["best_visual_sharpness_bonus"] = sharpness_bonus
+
+            if live_result["score"] >= COVETE_CANDIDATE_MIN_SCORE:
+                if selection_score > event_state["best_cov_score"]:
+                    event_state["best_cov_score"] = selection_score
+                    event_state["best_cov_frame"] = frame.copy()
+                    event_state["best_cov_roi_gray"] = roi_gray.copy()
+                    event_state["best_cov_box"] = main_motion_box
+                    event_state["best_cov_live_score"] = live_result["score"]
+                    event_state["best_cov_template_name"] = live_result["template_name"]
+
+        # ----------------------------
+        # FIM DE EVENTO
+        # ----------------------------
+        if prev_motion_detected and not motion_detected:
+            print(f"[EVENT] FIM | video={video_name} | frame={frame_index} | best_sel={event_state['best_visual_score']:.1f}")
+
+            frame_to_classify = event_state["best_visual_frame"]
+            roi_to_classify = event_state["best_visual_roi_gray"]
+            source_to_classify = "visual"
+            selected_selection_score = event_state["best_visual_score"]
+
+            if event_state["best_cov_frame"] is not None and event_state["best_cov_roi_gray"] is not None:
+                frame_to_classify = event_state["best_cov_frame"]
+                roi_to_classify = event_state["best_cov_roi_gray"]
+                source_to_classify = "cov_candidate"
+                selected_selection_score = event_state["best_cov_score"]
+
+            if frame_to_classify is not None and roi_to_classify is not None:
+                final_result = classify_roi_with_orb(roi_to_classify, orb, bf, templates)
+
+                last_final_score = final_result["score"]
+                last_final_template_name = final_result["template_name"]
+                last_final_source = source_to_classify
+
+                if final_result["is_covete"]:
+                    if now - last_save_covete >= SAVE_INTERVAL_COVETE:
+                        filename = f"dataset/covete/{video_name}_covete_{int(now * 1000)}.jpg"
+                        cv2.imwrite(filename, frame_to_classify)
+
+                        print(
+                            f"[DATASET] Guardado em covete: {filename} | "
+                            f"final_score={final_result['score']} | "
+                            f"selection={selected_selection_score:.1f} | "
+                            f"source={source_to_classify} | "
+                            f"tpl={final_result['template_name']} | kp={final_result['kp_count']}"
+                        )
+
+                        last_save_covete = now
+                        last_covete_detect_time = now
+                else:
+                    can_save_nao_covete = (
+                        final_result["score"] <= NAO_COVETE_MAX_SCORE and
+                        (now - last_covete_detect_time) >= POST_COVETE_BLOCK_SEC
+                    )
+
+                    if can_save_nao_covete and (now - last_save_nao_covete >= SAVE_INTERVAL_NAO_COVETE):
+                        filename = f"dataset/nao_covete/{video_name}_nao_covete_{int(now * 1000)}.jpg"
+                        cv2.imwrite(filename, frame_to_classify)
+
+                        print(
+                            f"[DATASET] Guardado em nao_covete: {filename} | "
+                            f"final_score={final_result['score']} | "
+                            f"selection={selected_selection_score:.1f} | "
+                            f"source={source_to_classify} | kp={final_result['kp_count']}"
+                        )
+
+                        last_save_nao_covete = now
+
+                if (
+                    DEBUG_SAVE_MATCHES and
+                    (now - last_debug_save >= DEBUG_SAVE_INTERVAL)
+                ):
+                    if save_debug_matches(now, roi_to_classify, final_result, video_name):
+                        last_debug_save = now
+
+            event_state = reset_event_state()
+
+        prev_motion_detected = motion_detected
+
+        # ----------------------------
+        # OVERLAY / PRINT
+        # ----------------------------
+        draw, text = draw_overlay(
+            frame=frame,
+            motion_detected=motion_detected,
+            live_result=live_result,
+            motion_mask=motion_mask,
+            main_motion_box=main_motion_box,
+            event_state=event_state,
+            changed_ratio=changed_ratio,
+            max_motion_area=max_motion_area,
+            frame_index=frame_index,
+            last_final_score=last_final_score,
+            last_final_template_name=last_final_template_name,
+            last_final_source=last_final_source
+        )
+
+        if now - last_print >= 0.2:
+            print(f"[{video_name}] {text}")
+            last_print = now
+
+        if SHOW_WINDOW:
+            cv2.imshow(f"Detecao de Covete - {video_name}", draw)
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27 or key == ord("q"):
+                print("[INFO] Interrompido pelo utilizador.")
+                break
+
+        time.sleep(SLEEP_SEC)
+
+    cap.release()
+
+    if SHOW_WINDOW:
+        cv2.destroyAllWindows()
+
+    print(f"[INFO] Processamento concluído para: {video_name}")
 
 
 # ============================================================
-# CLEANUP
+# MAIN
 # ============================================================
-cap.release()
+def main():
+    orb = cv2.ORB_create(nfeatures=1200)
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+    templates = load_templates(TEMPLATES_GLOB, orb)
 
-if writer is not None:
-    writer.release()
+    video_paths = sorted([
+        p for p in glob.glob(VIDEOS_GLOB)
+        if os.path.isfile(p) and os.path.splitext(p)[1].lower() in [".mp4", ".avi", ".mov", ".mkv"]
+    ])
 
-cv2.destroyAllWindows()
-print("[INFO] Processamento concluido.")
+    if not video_paths:
+        raise SystemExit("ERRO: nenhum vídeo encontrado na pasta videos")
+
+    print(f"\n[INFO] Foram encontrados {len(video_paths)} vídeo(s).\n")
+
+    for i, video_path in enumerate(video_paths, start=1):
+        print(f"\n==============================")
+        print(f"[INFO] Vídeo {i}/{len(video_paths)}")
+        print(f"==============================")
+        process_video(video_path, orb, bf, templates)
+
+    print("\n[INFO] Todos os vídeos foram processados.")
+
+
+if __name__ == "__main__":
+    main()

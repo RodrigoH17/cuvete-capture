@@ -43,6 +43,10 @@ python -m venv venv
 ```bash
 venv\Scripts\activate
 ```
+Se der erro colcoar primeiro `
+```bash
+
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 **Linux / macOS:**
 
